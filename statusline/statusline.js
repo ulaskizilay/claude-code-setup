@@ -120,52 +120,119 @@ function cachedGit(cwd, sessionId) {
   return info;
 }
 
-const PR_CACHE_TTL_MS = 120000;
+const REVIEW_CACHE_TTL_MS = 120000;
+// A failed lookup (CLI missing, not logged in, unreachable host) is retried less
+// often, so a broken setup costs one timeout every 10 minutes, not every 2.
+const REVIEW_ERROR_TTL_MS = 600000;
+const REVIEW_CLI_TIMEOUT_MS = 3000;
 
-function prStateFromGh(pr) {
-  if (pr.isDraft) return 'draft';
-  if (pr.reviewDecision === 'APPROVED') return 'approved';
-  if (pr.reviewDecision === 'CHANGES_REQUESTED') return 'changes_requested';
-  return 'pending';
+function run(cmd, args, cwd) {
+  return execFileSync(cmd, args, {
+    cwd,
+    stdio: ['ignore', 'pipe', 'ignore'],
+    timeout: REVIEW_CLI_TIMEOUT_MS,
+    // glab ignores SIGTERM while waiting on an unreachable host; only SIGKILL
+    // actually enforces the timeout.
+    killSignal: 'SIGKILL',
+  }).toString().trim();
 }
 
-// Claude Code's payload carries no PR info, so look up the current branch's
-// open PR with the GitHub CLI. Cached per repo+branch (misses included) so
-// `gh` runs at most once every two minutes.
-function cachedPr(cwd, branch) {
+// The remote the branch tracks, else "origin", else the first remote.
+function reviewRemoteUrl(cwd) {
+  let remote = '';
+  try {
+    remote = run('git', ['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{u}'], cwd).split('/')[0];
+  } catch {
+    // No upstream configured.
+  }
+  if (!remote) {
+    try {
+      const remotes = run('git', ['remote'], cwd).split('\n').filter(Boolean);
+      remote = remotes.includes('origin') ? 'origin' : remotes[0];
+    } catch {
+      return null;
+    }
+  }
+  if (!remote) return null;
+  try {
+    return run('git', ['remote', 'get-url', remote], cwd);
+  } catch {
+    return null;
+  }
+}
+
+// "git@host:group/repo.git" or "https://host/group/repo" -> { host, repoPath }
+function parseRemote(url) {
+  const match = url.match(/^(?:[a-z+]+:\/\/)?(?:[^@/]+@)?([^:/]+)(?::\d+)?[:/](.+?)(?:\.git)?\/?$/i);
+  return match ? { host: match[1].toLowerCase(), repoPath: match[2] } : null;
+}
+
+function githubPullRequest(cwd, repoPath, branch) {
+  const output = run('gh', ['pr', 'list', '--repo', repoPath, '--head', branch, '--state', 'open',
+    '--limit', '1', '--json', 'number,url,isDraft,reviewDecision'], cwd);
+  const list = JSON.parse(output);
+  if (!Array.isArray(list)) throw new Error('unexpected gh output');
+  const pr = list[0];
+  if (!pr) return null;
+  let reviewState = 'pending';
+  if (pr.isDraft) reviewState = 'draft';
+  else if (pr.reviewDecision === 'APPROVED') reviewState = 'approved';
+  else if (pr.reviewDecision === 'CHANGES_REQUESTED') reviewState = 'changes_requested';
+  return { kind: 'PR', ref: `#${pr.number}`, url: pr.url, review_state: reviewState };
+}
+
+const GITLAB_BLOCKING_STATUSES = new Set([
+  'requested_changes', 'conflict', 'discussions_not_resolved', 'need_rebase', 'blocked_status',
+]);
+
+function gitlabMergeRequest(cwd, remoteUrl, branch) {
+  const output = run('glab', ['mr', 'list', '--repo', remoteUrl, '--source-branch', branch,
+    '--per-page', '1', '--output', 'json'], cwd);
+  const list = JSON.parse(output);
+  if (!Array.isArray(list)) throw new Error('unexpected glab output');
+  const mr = list[0];
+  if (!mr) return null;
+  let reviewState = 'pending';
+  if (mr.draft) reviewState = 'draft';
+  else if (mr.detailed_merge_status === 'mergeable') reviewState = 'approved';
+  else if (GITLAB_BLOCKING_STATUSES.has(mr.detailed_merge_status)) reviewState = 'changes_requested';
+  return { kind: 'MR', ref: `!${mr.iid}`, url: mr.web_url, review_state: reviewState };
+}
+
+// Claude Code's payload carries no PR/MR info, so ask the forge's CLI about the
+// current branch: `gh` for github.com, `glab` for any other host (gitlab.com or
+// self-hosted). Cached per repo+branch, misses included, so the CLI runs at most
+// once every two minutes (failures: every ten). Missing or logged-out CLIs
+// just show nothing.
+function cachedReview(cwd, branch) {
   const key = `${cwd}:${branch}`.replace(/[^a-zA-Z0-9]+/g, '_').slice(-120);
-  const cacheFile = path.join(os.tmpdir(), `cc-statusline-pr-${key}`);
+  const cacheFile = path.join(os.tmpdir(), `cc-statusline-review-${key}`);
 
   try {
-    const stat = fs.statSync(cacheFile);
-    if (Date.now() - stat.mtimeMs < PR_CACHE_TTL_MS) {
-      return JSON.parse(fs.readFileSync(cacheFile, 'utf8'));
-    }
+    const cached = JSON.parse(fs.readFileSync(cacheFile, 'utf8'));
+    if (Date.now() - cached.at < cached.ttl) return cached.review;
   } catch {
-    // No cache yet, or it's stale.
+    // No cache yet, or it's unreadable.
   }
 
-  let pr = null;
+  let review = null;
+  let ttl = REVIEW_CACHE_TTL_MS;
   try {
-    const output = execFileSync(
-      'gh',
-      ['pr', 'view', '--json', 'number,url,state,isDraft,reviewDecision'],
-      { cwd, stdio: ['ignore', 'pipe', 'ignore'], timeout: 3000 }
-    ).toString();
-    const found = JSON.parse(output);
-    if (found.state === 'OPEN') {
-      pr = { number: found.number, url: found.url, review_state: prStateFromGh(found) };
-    }
+    const remoteUrl = reviewRemoteUrl(cwd);
+    const remote = remoteUrl && parseRemote(remoteUrl);
+    if (remote?.host === 'github.com') review = githubPullRequest(cwd, remote.repoPath, branch);
+    else if (remote) review = gitlabMergeRequest(cwd, remoteUrl, branch);
   } catch {
-    // No PR for this branch, gh missing or not authenticated: show nothing.
+    // CLI missing, not logged in, unreachable or timed out.
+    ttl = REVIEW_ERROR_TTL_MS;
   }
 
   try {
-    fs.writeFileSync(cacheFile, JSON.stringify(pr));
+    fs.writeFileSync(cacheFile, JSON.stringify({ at: Date.now(), ttl, review }));
   } catch {
     // Non-fatal; next refresh retries.
   }
-  return pr;
+  return review;
 }
 
 function buildLine1(data, narrow) {
@@ -201,11 +268,13 @@ function buildLine1(data, narrow) {
     line.push(segment);
   }
 
-  const pr = data.pr?.number ? data.pr : (git?.branch ? cachedPr(cwd, git.branch) : null);
-  if (pr?.number) {
-    const stateMark = PR_STATE_MARK[pr.review_state] || '';
-    const label = pr.url ? osc8(pr.url, `#${pr.number}`) : `#${pr.number}`;
-    line.push(`${DIM}PR ${RESET}${label}${stateMark ? ' ' + stateMark : ''}`);
+  const review = data.pr?.number
+    ? { kind: 'PR', ref: `#${data.pr.number}`, url: data.pr.url, review_state: data.pr.review_state }
+    : (git?.branch ? cachedReview(cwd, git.branch) : null);
+  if (review) {
+    const stateMark = PR_STATE_MARK[review.review_state] || '';
+    const label = review.url ? osc8(review.url, review.ref) : review.ref;
+    line.push(`${DIM}${review.kind} ${RESET}${label}${stateMark ? ' ' + stateMark : ''}`);
   }
 
   const modeBits = [];

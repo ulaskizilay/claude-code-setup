@@ -19,7 +19,7 @@ Everything here lives in `~/.claude/`, so it applies to every project without pe
 
 ## Status line
 
-**Line 1:** model, working directory (and worktree), git branch with ahead/behind and staged/modified/untracked counts, the branch's open pull request as a clickable link with its review state, effort level / fast mode.
+**Line 1:** model, working directory (and worktree), git branch with ahead/behind and staged/modified/untracked counts, the branch's open GitHub pull request or GitLab merge request as a clickable link with its review state, effort level / fast mode.
 
 **Line 2:** context usage bar with tokens left (plus a `200k+` note once a 1M-token session passes 200k input tokens, where long-context pricing applies), 5-hour and 7-day rate-limit usage with time until reset, session cost and duration, lines added/removed.
 
@@ -27,7 +27,30 @@ Percentages turn yellow at 70% and red at 90%. If the `COLUMNS` environment vari
 
 Claude Code pipes a JSON payload to the script on stdin on every refresh; the script prints ANSI-colored text back. Git info comes from a single `git status --porcelain=v2 --branch` call, cached per session for 5 seconds so it doesn't run on every keystroke.
 
-Claude Code's payload has no pull request information, so the script asks the GitHub CLI (`gh pr view`) for the current branch's open PR. The result, including "no PR", is cached per repo and branch for 2 minutes, so `gh` runs rarely and the first lookup (about a second) is the only slow one. Repos not hosted on GitHub, or a missing / logged-out `gh`, simply show no PR segment.
+### Pull requests and merge requests
+
+Claude Code's payload has no PR / MR information, so the script asks the forge's CLI about the current branch:
+
+| Remote host | CLI | Shows | Marks |
+|---|---|---|---|
+| `github.com` | [`gh`](https://cli.github.com/) | `PR #128` | ✓ approved, ✗ changes requested, • review pending, ◦ draft |
+| Anything else (gitlab.com or self-hosted GitLab) | [`glab`](https://gitlab.com/gitlab-org/cli) | `MR !43` | ✓ mergeable, ✗ changes requested / conflicts / unresolved threads / needs rebase, • waiting for approval or CI, ◦ draft |
+
+The remote queried is the one the branch tracks (its upstream), then `origin`, then the first remote, so repos with several remotes (for example a self-hosted GitLab plus a gitlab.com mirror) resolve to the right place.
+
+Results, including "no PR / MR", are cached per repo and branch for 2 minutes; a failed lookup (CLI missing, not logged in, host unreachable) is cached for 10 minutes. Each lookup is hard-killed after 3 seconds, so a broken setup can never freeze the status line for longer than that. A first lookup typically takes 0.4 to 1 second.
+
+To enable it, log in once per host:
+
+```bash
+gh auth login                                   # GitHub
+glab auth login --hostname gitlab.com           # gitlab.com
+glab auth login --hostname git.example.com      # self-hosted GitLab
+# self-hosted over plain http, token from stdin (paste, Enter, Ctrl+D):
+glab auth login --hostname 10.0.0.5 --api-protocol http --git-protocol ssh --stdin
+```
+
+A token with the `read_api` scope is enough for GitLab.
 
 ### Subagents
 
@@ -93,7 +116,7 @@ The rules are written in Turkish. In short:
 - Claude Code
 - Node.js (status line scripts, no dependencies)
 - bash, git and [`jq`](https://jqlang.org/) (hooks)
-- Optional: [`gh`](https://cli.github.com/) (logged in) for the PR segment, the formatters your projects use, `paplay` for the sounds
+- Optional: `gh` and / or `glab` (logged in) for the PR / MR segment, the formatters your projects use, `paplay` for the sounds
 
 ## Installation
 
