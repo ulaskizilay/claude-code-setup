@@ -19,19 +19,23 @@ Everything here lives in `~/.claude/`, so it applies to every project without pe
 
 ## Status line
 
-**Line 1:** model, working directory (and worktree), git branch with ahead/behind and staged/modified/untracked counts, open PR as a clickable link with its review state, effort level / fast mode.
+**Line 1:** model, working directory (and worktree), git branch with ahead/behind and staged/modified/untracked counts, the branch's open pull request as a clickable link with its review state, effort level / fast mode.
 
-**Line 2:** context usage bar with tokens left (and a warning past 200k), 5-hour and 7-day rate-limit usage with time until reset, session cost and duration, lines added/removed.
+**Line 2:** context usage bar with tokens left (plus a `200k+` note once a 1M-token session passes 200k input tokens, where long-context pricing applies), 5-hour and 7-day rate-limit usage with time until reset, session cost and duration, lines added/removed.
 
-Percentages turn yellow at 70% and red at 90%. Below 90 columns the line drops the less important parts (reset timers, cost, line counts) and truncates names harder.
+Percentages turn yellow at 70% and red at 90%. If the `COLUMNS` environment variable is below 90, the line drops the less important parts (reset timers, cost, line counts) and truncates names harder.
 
 Claude Code pipes a JSON payload to the script on stdin on every refresh; the script prints ANSI-colored text back. Git info comes from a single `git status --porcelain=v2 --branch` call, cached per session for 5 seconds so it doesn't run on every keystroke.
+
+Claude Code's payload has no pull request information, so the script asks the GitHub CLI (`gh pr view`) for the current branch's open PR. The result, including "no PR", is cached per repo and branch for 2 minutes, so `gh` runs rarely and the first lookup (about a second) is the only slow one. Repos not hosted on GitHub, or a missing / logged-out `gh`, simply show no PR segment.
 
 ### Subagents
 
 ![Subagent rows](assets/subagents.png)
 
-When subagents run, `subagentStatusLine` receives one JSON object with a `tasks[]` array and prints one `{"id", "content"}` line per task. Claude Code matches each line to its subagent row by `id`. Each row shows a status mark (running / completed / failed), the agent's name and task, context usage, and model/effort. Tasks the script doesn't emit keep the default rendering.
+When subagents run, `subagentStatusLine` receives one JSON object with a `tasks[]` array and prints one `{"id", "content"}` line per task. Claude Code matches each line to its subagent row by `id`. Each row shows a status mark (running / completed / failed), the agent type (`agentType` in the payload, e.g. `general-purpose` or a custom agent's name), its task, context usage, and model/effort. Tasks the script doesn't emit keep the default rendering.
+
+Note: recent Claude Code versions mark `subagentStatusLine` as deprecated in favor of mods. It still works, but may stop in a future release.
 
 ## Session start hook
 
@@ -89,7 +93,7 @@ The rules are written in Turkish. In short:
 - Claude Code
 - Node.js (status line scripts, no dependencies)
 - bash, git and [`jq`](https://jqlang.org/) (hooks)
-- Optional: the formatters your projects use, `paplay` for the sounds
+- Optional: [`gh`](https://cli.github.com/) (logged in) for the PR segment, the formatters your projects use, `paplay` for the sounds
 
 ## Installation
 

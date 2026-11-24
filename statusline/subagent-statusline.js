@@ -40,7 +40,9 @@ function kfmt(n) {
 function renderTaskRow(task, cols) {
   const parts = [STATUS_MARK[task.status] || `${DIM}·${RESET}`];
 
-  parts.push(`${CYAN}${truncate(task.name || task.type || 'agent', 18)}${RESET}`);
+  // Claude Code sends the agent kind in `agentType` (e.g. "general-purpose");
+  // `type` is only the generic "local_agent", so it's the last resort.
+  parts.push(`${CYAN}${truncate(task.name || task.agentType || task.type || 'agent', 18)}${RESET}`);
 
   const description = task.description || task.label;
   if (description) parts.push(`${DIM}${truncate(description, cols < 80 ? 24 : 44)}${RESET}`);

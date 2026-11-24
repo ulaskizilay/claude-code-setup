@@ -120,6 +120,54 @@ function cachedGit(cwd, sessionId) {
   return info;
 }
 
+const PR_CACHE_TTL_MS = 120000;
+
+function prStateFromGh(pr) {
+  if (pr.isDraft) return 'draft';
+  if (pr.reviewDecision === 'APPROVED') return 'approved';
+  if (pr.reviewDecision === 'CHANGES_REQUESTED') return 'changes_requested';
+  return 'pending';
+}
+
+// Claude Code's payload carries no PR info, so look up the current branch's
+// open PR with the GitHub CLI. Cached per repo+branch (misses included) so
+// `gh` runs at most once every two minutes.
+function cachedPr(cwd, branch) {
+  const key = `${cwd}:${branch}`.replace(/[^a-zA-Z0-9]+/g, '_').slice(-120);
+  const cacheFile = path.join(os.tmpdir(), `cc-statusline-pr-${key}`);
+
+  try {
+    const stat = fs.statSync(cacheFile);
+    if (Date.now() - stat.mtimeMs < PR_CACHE_TTL_MS) {
+      return JSON.parse(fs.readFileSync(cacheFile, 'utf8'));
+    }
+  } catch {
+    // No cache yet, or it's stale.
+  }
+
+  let pr = null;
+  try {
+    const output = execFileSync(
+      'gh',
+      ['pr', 'view', '--json', 'number,url,state,isDraft,reviewDecision'],
+      { cwd, stdio: ['ignore', 'pipe', 'ignore'], timeout: 3000 }
+    ).toString();
+    const found = JSON.parse(output);
+    if (found.state === 'OPEN') {
+      pr = { number: found.number, url: found.url, review_state: prStateFromGh(found) };
+    }
+  } catch {
+    // No PR for this branch, gh missing or not authenticated: show nothing.
+  }
+
+  try {
+    fs.writeFileSync(cacheFile, JSON.stringify(pr));
+  } catch {
+    // Non-fatal; next refresh retries.
+  }
+  return pr;
+}
+
 function buildLine1(data, narrow) {
   const line = [];
 
@@ -153,7 +201,7 @@ function buildLine1(data, narrow) {
     line.push(segment);
   }
 
-  const pr = data.pr;
+  const pr = data.pr?.number ? data.pr : (git?.branch ? cachedPr(cwd, git.branch) : null);
   if (pr?.number) {
     const stateMark = PR_STATE_MARK[pr.review_state] || '';
     const label = pr.url ? osc8(pr.url, `#${pr.number}`) : `#${pr.number}`;
@@ -186,11 +234,15 @@ function buildLine2(data, narrow) {
     const bar = '▓'.repeat(filled) + '░'.repeat(CONTEXT_BAR_WIDTH - filled);
     let segment = `${colorForPct(pct)}${bar} ${pct}%${RESET}`;
 
+    const notes = [];
     if (typeof ctx.context_window_size === 'number' && typeof ctx.total_input_tokens === 'number' && ctx.context_window_size > 0) {
       const left = Math.max(0, ctx.context_window_size - ctx.total_input_tokens);
-      segment += ` ${DIM}(${kfmt(left)} left)${RESET}`;
+      notes.push(`${kfmt(left)} left`);
     }
-    if (data.exceeds_200k_tokens) segment += ` ${RED}⚠${RESET}`;
+    // On 1M-token windows, past 200k input tokens is informational (long-context
+    // pricing), not a capacity problem, so it's a dim note rather than an alarm.
+    if (data.exceeds_200k_tokens) notes.push('200k+');
+    if (notes.length) segment += ` ${DIM}(${notes.join(' · ')})${RESET}`;
     line.push(segment);
   } else {
     line.push(`${DIM}ctx: n/a${RESET}`);
