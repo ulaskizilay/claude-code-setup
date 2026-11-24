@@ -1,0 +1,83 @@
+{
+  "permissions": {
+    "allow": [
+      "CronCreate",
+      "CronDelete"
+    ],
+    "defaultMode": "auto"
+  },
+  "model": "opus",
+  "hooks": {
+    "Notification": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "paplay /usr/share/sounds/freedesktop/stereo/message.oga"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "paplay /usr/share/sounds/freedesktop/stereo/complete.oga"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.claude/hooks/format-file.sh",
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.claude/hooks/session-start.sh",
+            "timeout": 15
+          }
+        ]
+      }
+    ]
+  },
+  "statusLine": {
+    "type": "command",
+    "command": "node ~/.claude/statusline.js",
+    "padding": 1,
+    "refreshInterval": 10
+  },
+  "subagentStatusLine": {
+    "type": "command",
+    "command": "node ~/.claude/subagent-statusline.js"
+  },
+  "modelSettings": {
+    "claude-sonnet-5": {
+      "effortLevel": "medium"
+    },
+    "claude-opus-5-5": {
+      "effortLevel": "medium"
+    },
+    "claude-sonnet-5-5": {
+      "effortLevel": "medium"
+    }
+  },
+  "theme": "auto",
+  "agentPushNotifEnabled": true,
+  "attribution": {
+    "commit": "",
+    "pr": "",
+    "sessionUrl": false
+  }
+}

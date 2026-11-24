@@ -1,95 +1,141 @@
-# claude-statusline
+# claude-code-setup
 
-Custom status line scripts I use for my [Claude Code](https://claude.com/claude-code) setup. They give a two-line, color-coded, information-dense status line:
+My global [Claude Code](https://claude.com/claude-code) setup: a two-line status line, a set of always-on engineering rules, and two hooks that give every session the project context it needs and keep edited files formatted.
 
-- **Line 1:** model name, working directory (+ worktree if any), git branch (+ ahead/behind, staged/modified/untracked counts), open PR (clickable link + review state, if any), effort level / fast mode
-- **Line 2:** context usage bar (+ tokens left, 200k warning), 5-hour and 7-day rate limit percentages (+ time until reset), session cost + duration, lines added/removed
+Everything here lives in `~/.claude/`, so it applies to every project without per-repo configuration.
 
-![Status line example](assets/screenshot.jpg)
+![Status line](assets/statusline.png)
 
-There's also a separate, compact status line script for subagents (`subagent-statusline.js`) — see [How the subagent status line works](#how-the-subagent-status-line-works) below for what it actually does.
+## What's inside
+
+| Path | What it does |
+|---|---|
+| [`statusline/statusline.js`](statusline/statusline.js) | Two-line status line: model, directory, git state, PR, effort / context usage, rate limits, cost, lines changed |
+| [`statusline/subagent-statusline.js`](statusline/subagent-statusline.js) | Compact row per running subagent: status, name, task, context usage, model |
+| [`hooks/session-start.sh`](hooks/session-start.sh) | `SessionStart` hook: shows a project summary when a session opens and hands the model the project's commands and existing ADRs |
+| [`hooks/format-file.sh`](hooks/format-file.sh) | `PostToolUse` hook: formats every file Claude writes or edits with the project's own formatter |
+| [`CLAUDE.md`](CLAUDE.md) | Global rules loaded into every session (written in Turkish, summarized [below](#claudemd-global-rules)) |
+| [`settings.json`](settings.json) | The `~/.claude/settings.json` that wires all of the above together |
+
+## Status line
+
+**Line 1:** model, working directory (and worktree), git branch with ahead/behind and staged/modified/untracked counts, open PR as a clickable link with its review state, effort level / fast mode.
+
+**Line 2:** context usage bar with tokens left (and a warning past 200k), 5-hour and 7-day rate-limit usage with time until reset, session cost and duration, lines added/removed.
+
+Percentages turn yellow at 70% and red at 90%. Below 90 columns the line drops the less important parts (reset timers, cost, line counts) and truncates names harder.
+
+Claude Code pipes a JSON payload to the script on stdin on every refresh; the script prints ANSI-colored text back. Git info comes from a single `git status --porcelain=v2 --branch` call, cached per session for 5 seconds so it doesn't run on every keystroke.
+
+### Subagents
+
+![Subagent rows](assets/subagents.png)
+
+When subagents run, `subagentStatusLine` receives one JSON object with a `tasks[]` array and prints one `{"id", "content"}` line per task. Claude Code matches each line to its subagent row by `id`. Each row shows a status mark (running / completed / failed), the agent's name and task, context usage, and model/effort. Tasks the script doesn't emit keep the default rendering.
+
+## Session start hook
+
+![Session start summary](assets/session-start.png)
+
+Runs on startup, resume, `/clear` and after context compaction. It looks at the directory the session was opened in:
+
+| Opened in | Shows |
+|---|---|
+| A git repo or project folder | Branch, uncommitted file count, test / lint / single-test commands, active formatter, ADR count |
+| A folder containing several repos | The same summary for each repo found up to 3 levels deep (git repos only, if there are any) |
+| A non-project folder (e.g. `~`) | The 6 most recently used projects, read from Claude Code's own session logs |
+
+It also warns when `node_modules` is missing (tests and the formatter won't run) or when there is a `.env.example` without a `.env`.
+
+The user sees a short summary; the model additionally receives the last commits, the uncommitted changes, every detected command, and the titles and statuses of the most recent ADRs, so it doesn't have to rediscover them each session. After a compaction it also gets a short reminder of the key rules in `CLAUDE.md`.
+
+Commands are detected from `package.json` scripts (npm / pnpm / yarn / bun from the lockfile; jest or vitest for single tests), `pubspec.yaml` (Flutter / Dart), `manage.py` (Django), `pyproject.toml` / `requirements.txt` (pytest, ruff), `go.mod`, `Cargo.toml` and `Makefile` targets.
+
+The hook's output text is in Turkish, matching `CLAUDE.md`.
+
+## Format-on-edit hook
+
+After every `Write` / `Edit`, the edited file (only that file) is run through the formatter the project already uses:
+
+| Files | Formatter | Runs when |
+|---|---|---|
+| JS / TS / JSON / CSS / HTML / Markdown / YAML | Biome or Prettier | The project has a Biome / Prettier config **and** the tool is installed in `node_modules` |
+| Python | Ruff or Black | Configured in `ruff.toml` / `pyproject.toml` and installed |
+| Dart | `dart format` | The file is inside a project with `pubspec.yaml` |
+| Go / Rust | `gofmt` / `rustfmt` | The tool is installed |
+
+Projects without a formatter config are left alone, so the hook never produces unrelated formatting diffs. It never blocks an edit: any failure is ignored.
+
+## CLAUDE.md (global rules)
+
+The rules are written in Turkish. In short:
+
+0. **Response style.** Answer first, no filler intros or closers, numbered steps for multi-step work, restate progress on long tasks, say "done" only when verified, no emoji.
+1. **Engineering principles.** Clean Code, DRY, SOLID, KISS, YAGNI and TDD, plus explicit rules for when they conflict (correctness first; no abstraction before a third repetition; no single-implementation interfaces). Also: error handling, security, backward compatibility, dependencies and test quality. During development only the affected tests run; the full suite runs once when the work is done.
+2. **Architecture Decision Records.** Any change that involves a real decision (new dependency, schema, public API, security, trade-offs) gets an ADR in Turkish under the project's ADR folder, with clear criteria for when one is and isn't needed.
+3. **Git.** Small, single-purpose commits following the repo's existing message style; destructive git operations only with explicit approval; no AI attribution in commits, PRs or branch names.
+4. **When work is done.** Run the full suite and linters once, review the diff, give a short report.
+
+## Settings
+
+[`settings.json`](settings.json) contains, besides the status line and hooks:
+
+- `attribution` set to empty strings and `sessionUrl: false`: no `Co-Authored-By` trailer or "Generated with" line in commits and PRs.
+- `Notification` and `Stop` hooks that play a sound with `paplay` (Linux / PulseAudio). Remove or replace them on other systems.
+- Personal preferences (`model`, `permissions`, per-model effort levels, `theme`). Adjust to taste.
 
 ## Requirements
 
-- [Node.js](https://nodejs.org/) (any recent version, no extra dependencies)
-- Claude Code CLI
+- Claude Code
+- Node.js (status line scripts, no dependencies)
+- bash, git and [`jq`](https://jqlang.org/) (hooks)
+- Optional: the formatters your projects use, `paplay` for the sounds
 
 ## Installation
 
-1. Clone this repo or download the files:
+1. Clone the repo:
 
    ```bash
-   git clone https://github.com/ulaskizilay/claude-statusline.git
+   git clone https://github.com/ulaskizilay/claude-code-setup.git
+   cd claude-code-setup
    ```
 
-2. Copy `statusline.js` and `subagent-statusline.js` into your `~/.claude/` folder.
-
-   On macOS/Linux:
+2. Back up your current config and copy the files into `~/.claude/`:
 
    ```bash
-   cp claude-statusline/scripts/statusline.js ~/.claude/statusline.js
-   cp claude-statusline/scripts/subagent-statusline.js ~/.claude/subagent-statusline.js
+   cp ~/.claude/settings.json ~/.claude/settings.json.bak 2>/dev/null
+   cp ~/.claude/CLAUDE.md ~/.claude/CLAUDE.md.bak 2>/dev/null
+
+   mkdir -p ~/.claude/hooks
+   cp statusline/*.js ~/.claude/
+   cp hooks/*.sh ~/.claude/hooks/
+   chmod +x ~/.claude/hooks/*.sh
+   cp CLAUDE.md ~/.claude/CLAUDE.md
    ```
 
-   On Windows (PowerShell):
+3. Merge the settings. To take everything:
 
-   ```powershell
-   Copy-Item claude-statusline\scripts\statusline.js "$env:USERPROFILE\.claude\statusline.js"
-   Copy-Item claude-statusline\scripts\subagent-statusline.js "$env:USERPROFILE\.claude\subagent-statusline.js"
+   ```bash
+   cp settings.json ~/.claude/settings.json
    ```
 
-   On Windows (Git Bash/WSL), the macOS/Linux `cp` commands above work as-is.
+   Or merge into an existing file, keeping your own values where both define the same key (arrays such as hook lists are replaced, not concatenated, so check the result):
 
-3. Add the following to your `~/.claude/settings.json` (create it if it doesn't exist, or update the `statusLine` / `subagentStatusLine` fields if it does):
-
-   ```json
-   {
-     "statusLine": {
-       "type": "command",
-       "command": "node ~/.claude/statusline.js",
-       "padding": 1,
-       "refreshInterval": 10
-     },
-     "subagentStatusLine": {
-       "type": "command",
-       "command": "node ~/.claude/subagent-statusline.js"
-     }
-   }
+   ```bash
+   jq -s '.[1] * .[0]' ~/.claude/settings.json.bak settings.json > ~/.claude/settings.json
    ```
 
-4. Restart Claude Code (or start a new session). The status line will show up automatically.
+4. Start a new Claude Code session. Run `/hooks` to confirm both hooks are registered.
 
-## How the main status line works
-
-On every update, Claude Code sends a JSON object over stdin (model info, context window usage, rate limits, cost, git/worktree info, etc.). The script reads that JSON and writes ANSI-colored text to stdout, which Claude Code renders below the prompt. Git branch/ahead-behind/staged info is computed separately inside the script via `git status --porcelain=v2 --branch`, cached per session for ~5 seconds so it doesn't run on every single keystroke.
-
-## How the subagent status line works
-
-When Claude Code runs subagents (via the `Agent`/`Task` tool — e.g. background research agents, forks, parallel workers), each one gets its own row in the UI showing its live progress. `subagentStatusLine` is the script that controls what that row looks like.
-
-- Claude Code sends **one JSON object** on stdin containing an array `tasks[]` — one entry per currently running/finished subagent, with fields like `id`, `name`, `type`, `status` (`running` / `completed` / `failed` / …), `description`, `model`, `effort`, `contextWindowSize`, `tokenCount`.
-- For **each** task, the script builds a row: a status icon (▸ running / ✓ completed / ✗ failed), the agent's name, its description, its context-window usage as a percentage + token count, and its model/effort.
-- Instead of printing all rows to stdout at once (like the main statusline does), it writes **one JSON line per task**: `{"id": "<task id>", "content": "<formatted row>"}`. Claude Code matches each line back to the corresponding subagent by `id` and uses `content` to override that row's display. Any task the script doesn't emit an id for just keeps its default rendering.
-
-In short: `statusline.js` formats the single line at the bottom of your terminal; `subagent-statusline.js` formats each individual row when you have multiple subagents running at once, so you can see at a glance which one is running, its progress (context %), and what model/effort it's using.
-
-## Project structure
-
-```
-claude-statusline/
-├── scripts/
-│   ├── statusline.js            # main status line renderer
-│   └── subagent-statusline.js   # per-subagent row renderer
-├── assets/
-│   └── screenshot.jpg           # example output
-├── README.md
-└── LICENSE
-```
+Only want the status line? Copy `statusline/*.js` and add just the `statusLine` and `subagentStatusLine` blocks from `settings.json`.
 
 ## Customization
 
-Colors, widths (the context bar is 10 characters), truncate lengths, and the `narrow` (small terminal) threshold (`cols < 90`) are all constants near the top of the file. To add/remove sections from a line, edit the `l1.push(...)` / `l2.push(...)` calls (or the `parts.push(...)` calls in the subagent script).
+- **Status line:** colors, the context bar width (10 characters), truncation lengths and the narrow-terminal threshold (`cols < 90`) are constants near the top of `statusline.js`. Add or remove segments by editing the `line.push(...)` calls in `buildLine1` / `buildLine2`.
+- **Session start:** `MARKERS` (which files mark a project), `SKIP_DIRS` and `SCAN_DEPTH` are at the top of `session-start.sh`.
+- **Formatter:** each file type is one `case` branch in `format-file.sh`.
+- **Rules:** `CLAUDE.md` is plain Markdown. Keep it under ~200 lines; longer files are followed less reliably.
 
 ## License
 
-[MIT](LICENSE) — free to use and adapt for your own setup.
+[MIT](LICENSE)
